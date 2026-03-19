@@ -1,24 +1,78 @@
-name: MacRDP
-on: 
+name: Mac VNC via Tailscale
+
+on:
   workflow_dispatch:
+
 jobs:
-  build:
-    name: MacRDP
+  secure-mac-vnc:
     runs-on: macos-latest
-    
-    steps:                 
-    - name: Enabling Remote Access
-      env:
-        NGROK_AUTH_TOKEN: ${{ secrets.NGROK_AUTH_TOKEN }}
-      run: |
-          curl -s -o start.sh -L "https://raw.githubusercontent.com/JohnnyNetsec/github-vm/main/mac/start.sh"
-          chmod +x start.sh
-          bash start.sh "$NGROK_AUTH_TOKEN"
+    timeout-minutes: 360 # GitHub Actions max limit is 6 hours (360 mins)
+
+    steps:
+      - name: Enable macOS Screen Sharing (VNC)
+        run: |
+          # Apple এর ডিফল্ট রিমোট ম্যানেজমেন্ট টুল (kickstart) দিয়ে Screen Sharing চালু করা
+          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart -activate -configure -access -on -restart -agent -privs -all
           
-    - name: Log In Details To VNC Server
-      run: |
-         chmod +x login.sh
-         bash login.sh
-         
-    - name: MacOS System running...
-      uses: mxschmitt/action-tmate@v2
+          # VNC পোর্ট (5900) ওপেন করা
+          sudo defaults write /var/db/launchd.db/com.apple.launchd/overrides.plist com.apple.screensharing -dict Disabled -bool false
+          sudo launchctl load -w /System/Library/LaunchDaemons/com.apple.screensharing.plist
+
+      - name: Create Secure Password for User
+        run: |
+          # একটি রেনডম ১০ অক্ষরের পাসওয়ার্ড তৈরি করা
+          PASSWORD=$(openssl rand -base64 12 | tr -dc 'a-zA-Z0-9' | head -c 10)
+          USER_NAME=$(whoami)
+          
+          # বর্তমান ইউজার (runner)-এর পাসওয়ার্ড সেট করা
+          sudo dscl . -passwd /Users/$USER_NAME "$PASSWORD"
+          
+          # লগইন ডিটেইলস সেভ করা
+          echo "MAC_USER=$USER_NAME" >> $GITHUB_ENV
+          echo "MAC_PASS=$PASSWORD" >> $GITHUB_ENV
+
+      - name: Install Tailscale
+        run: |
+          # Homebrew ব্যবহার করে Tailscale CLI ইনস্টল করা
+          brew install tailscale
+          
+          # ব্যাকগ্রাউন্ডে Tailscale সার্ভিস রান করানো
+          sudo tailscaled > /dev/null 2>&1 &
+          sleep 5
+
+      - name: Establish Tailscale Connection
+        run: |
+          # Tailscale কানেক্ট করা (Secrets থেকে Auth Key ব্যবহার করে)
+          sudo tailscale up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=mac-runner-${{ github.run_id }} --accept-routes
+          
+          # Tailscale IP বের করা
+          TS_IP=$(tailscale ip -4)
+          
+          if [ -z "$TS_IP" ]; then
+            echo "Tailscale IP not assigned. Exiting."
+            exit 1
+          fi
+          
+          echo "TAILSCALE_IP=$TS_IP" >> $GITHUB_ENV
+
+      - name: Show Connection Details
+        run: |
+          echo ""
+          echo "=========================================="
+          echo "          MAC VNC ACCESS DETAILS          "
+          echo "=========================================="
+          echo "Tailscale IP : $TAILSCALE_IP"
+          echo "Username     : $MAC_USER"
+          echo "Password     : $MAC_PASS"
+          echo "=========================================="
+          echo "Connect using a VNC Viewer (RealVNC, TightVNC) to $TAILSCALE_IP"
+          echo "If using a Mac, open Safari and type: vnc://$TAILSCALE_IP"
+          echo ""
+
+      - name: Maintain Connection
+        run: |
+          # সেশনটি চালু রাখার জন্য ইনফিনিট লুপ
+          while true; do
+            echo "[$(date)] Mac VNC Active - Connect via Tailscale IP. Cancel workflow to stop."
+            sleep 300
+          done
